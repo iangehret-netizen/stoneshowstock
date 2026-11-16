@@ -46,11 +46,11 @@
       var today = new Date();
       var key = today.getFullYear() + "-" + (today.getMonth() + 1) + "-" + today.getDate();
       var seen = false;
-      try { seen = localStorage.getItem("gsc:cover:day") === key; } catch (e) {}
+      try { seen = localStorage.getItem("sss:cover:day") === key; } catch (e) {}
       /* cover shows every time the app opens */
       el.style.display = "flex";
       document.getElementById("gsc-cover-open").addEventListener("click", function () {
-        try { localStorage.setItem("gsc:cover:day", key); } catch (e) {}
+        try { localStorage.setItem("sss:cover:day", key); } catch (e) {}
         el.className = "gsc-hide";
         setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
       });

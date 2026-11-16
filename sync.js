@@ -36,8 +36,8 @@
   // only a passcode field — but Firebase still does real server-side auth.
   var SYNC_EMAIL = "sync@stoneshowstock.app";
 
-  var LOCAL_PREFIX = "gsc:";
-  var META_PREFIX = "gsc:__syncmeta:";
+  var LOCAL_PREFIX = "sss:";
+  var META_PREFIX = "sss:__syncmeta:";
   var SYNC_KEY_PREFIX = "sheepwrld:"; // only sync app data, not misc local keys
 
   var pendingPushQueue = [];
