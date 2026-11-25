@@ -40,6 +40,11 @@
   var META_PREFIX = "sss:__syncmeta:";
   var SYNC_KEY_PREFIX = "sheepwrld:"; // only sync app data, not misc local keys
 
+  // v55: showman mode. Set when a showman code (not the passcode) unlocked this phone.
+  var SM = null;
+  try { SM = JSON.parse(localStorage.getItem("sss:__sm") || "null"); } catch (e) {}
+  window.__gscShowman = SM;
+
   var pendingPushQueue = [];
   var fbApp, auth, db;
   var authReady = false;
@@ -53,9 +58,11 @@
   // 1. Synchronous bridge — must exist before bundle.js runs.
   // ---------------------------------------------------------------------
   window.__gscSyncPush = function (key, value) {
+    if (SM) { if (window.__gscSMLocal) window.__gscSMLocal(key, value); return; } // showman phones never write to the owner's records
     if (typeof key !== "string" || key.indexOf(SYNC_KEY_PREFIX) !== 0) return;
     pendingPushQueue.push({ key: key, value: value, ts: Date.now() });
     flushQueue();
+    if (window.__gscSMOwnerTouch) window.__gscSMOwnerTouch(key);
   };
 
   function flushQueue() {
@@ -85,7 +92,7 @@
     if (!pillEl) return;
     var map = {
       locked: ["Locked", "#555"],
-      syncing: ["Syncing…", "#0A6FB0"],
+      syncing: ["Syncing…", "#8a6d00"],
       synced: ["Synced", "#2e7d32"],
       offline: ["Offline — saved on device", "#5a5a5a"],
       error: ["Sync error", "#8b2f2f"],
@@ -99,18 +106,18 @@
     var overlay = document.createElement("div");
     overlay.id = "gsc-sync-overlay";
     overlay.style.cssText =
-      "position:fixed;inset:0;z-index:99999;background:#000000;display:flex;" +
+      "position:fixed;inset:0;z-index:99999;background:#0B0B0D;display:flex;" +
       "align-items:center;justify-content:center;flex-direction:column;gap:14px;" +
       "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;" +
       "color:#fff;padding:24px;box-sizing:border-box;text-align:center;";
     overlay.innerHTML =
       '<div style="font-size:20px;font-weight:600;">Stone Show Stock</div>' +
-      '<div style="font-size:14px;color:#aaa;max-width:280px;">Enter the passcode to unlock this device.</div>' +
+      '<div style="font-size:14px;color:#aaa;max-width:280px;">Enter the passcode or your showman code.</div>' +
       '<input id="gsc-sync-passcode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" ' +
       'style="width:220px;padding:12px 14px;border-radius:8px;border:1px solid #444;background:#2A2A2A;color:#fff;' +
       'font-size:16px;text-align:center;" placeholder="Passcode" />' +
       '<button id="gsc-sync-unlock" style="width:220px;padding:12px;border-radius:8px;border:none;' +
-      'background:#0A8FE0;color:#fff;font-size:15px;font-weight:600;cursor:pointer;">Unlock</button>' +
+      'background:#0A8FE0;color:#FFFFFF;font-size:15px;font-weight:600;cursor:pointer;">Unlock</button>' +
       '<div id="gsc-sync-error" style="font-size:13px;color:#e57373;min-height:16px;max-width:280px;"></div>';
     document.body.appendChild(overlay);
 
@@ -156,21 +163,93 @@
     if (overlayEl) overlayEl.style.display = "flex";
   }
 
+  // v63: name what changed, and quietly reload right after opening instead of nagging.
+  var bootAt = Date.now(), userBusy = false, changedNames = {};
+  ["pointerdown", "keydown"].forEach(function (ev) {
+    document.addEventListener(ev, function (e) {
+      var t = e.target;
+      if (t && t.closest && (t.closest("#gsc-cover") || t.closest("#gsc-sync-overlay") || t.closest("#gsc-sync-banner"))) return;
+      userBusy = true;
+    }, true);
+  });
+  function nameForKey(k) {
+    var m;
+    if ((m = /^sheepwrld:showbarn:(.+)$/.exec(k))) return "Show Lambs " + m[1];
+    if (k === "sheepwrld:herd" || k === "sheepwrld:herdhealth") return "Herd View";
+    if (k === "sheepwrld:of:stone") return "Lamb Roster";
+    if (/^sheepwrld:(of:|otherfarms)/.test(k)) return "Other Farms";
+    if (/^sheepwrld:showman/.test(k)) return "Showman entries";
+    if (k === "sheepwrld:years") return "year list";
+    if (/^sheepwrld:seeded:/.test(k)) return null;
+    return "settings";
+  }
+  var lastTyped = 0, pendingRec = {};
+  ["input", "keydown"].forEach(function (ev) { document.addEventListener(ev, function (e) { var t = e.target; if (t && t.closest && t.closest("#gsc-sync-overlay")) return; lastTyped = Date.now(); }, true); });
+  // v65: someone is mid-edit if a form/box is open, a field has focus, or they typed in the last 30 seconds
+  function isEditing() {
+    var a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.closest("#gsc-sync-overlay")) return true;
+    if (Date.now() - lastTyped < 30000) return true;
+    if (document.querySelector('div[style*="z-index: 9990"]')) return true;
+    var btns = document.querySelectorAll("#root button");
+    for (var i = 0; i < btns.length; i++) { var t = (btns[i].textContent || "").trim(); if ((t === "Cancel" || /^Save( |$)/.test(t)) && btns[i].offsetParent) return true; }
+    return false;
+  }
+  function isRecordKey(k) { return /^sheepwrld:(showbarn:|herd$|of:|years$)/.test(k); }
+  function extSet(k) {
+    if (!window.gxExtSet) return;
+    try { var v = localStorage.getItem(LOCAL_PREFIX + k); window.gxExtSet(k, v == null ? undefined : JSON.parse(v)); } catch (e) {}
+  }
+  // put changed records on screen without a page reload
+  function liveApply(keys) {
+    var full = false, season = false, herd = false;
+    keys.forEach(function (k) {
+      if (/^sheepwrld:of:/.test(k)) extSet(k);
+      else if (/^sheepwrld:showbarn:/.test(k)) season = true;
+      else if (k === "sheepwrld:herd") herd = true;
+      else full = true;
+    });
+    if (full) { window.location.reload(); return; }
+    try { if (season) window.dispatchEvent(new Event("gsc-reload-season")); if (herd) window.dispatchEvent(new Event("gsc-reload-herd")); } catch (e) {}
+  }
+  function applyRemote(keys) {
+    var rec = [];
+    keys.forEach(function (k) { extSet(k); if (isRecordKey(k)) rec.push(k); }); // everything else updates quietly
+    if (!rec.length) return;
+    if (quietReloadOk()) { try { sessionStorage.setItem("sss:autoReload", String(Date.now())); } catch (e) {} window.location.reload(); return; }
+    if (isEditing()) { rec.forEach(function (k) { pendingRec[k] = 1; var nm = nameForKey(k); if (nm) changedNames[nm] = 1; }); showUpdateBanner(); return; }
+    liveApply(rec);
+  }
+  // once they finish editing, catch up on whatever came in meanwhile
+  setInterval(function () {
+    var ks = Object.keys(pendingRec);
+    if (!ks.length || isEditing()) return;
+    pendingRec = {}; changedNames = {};
+    var b = document.getElementById("gsc-sync-banner"); if (b) b.remove(); bannerShown = false;
+    liveApply(ks);
+  }, 5000);
+  function bannerText() { var n = Object.keys(changedNames); return "New data synced from another device" + (n.length ? ": " + n.join(", ") : "") + "."; }
+  function quietReloadOk() {
+    if (userBusy || Date.now() - bootAt > 15000) return false;
+    var last = 0; try { last = +sessionStorage.getItem("sss:autoReload") || 0; } catch (e) {}
+    return Date.now() - last > 60000;
+  }
   function showUpdateBanner() {
-    if (bannerShown) return;
+    if (bannerShown) { var s = document.querySelector("#gsc-sync-banner span"); if (s) s.textContent = bannerText(); return; }
     bannerShown = true;
     var banner = document.createElement("div");
     banner.id = "gsc-sync-banner";
     banner.style.cssText =
-      "position:fixed;top:0;left:0;right:0;z-index:9997;background:#2f5233;color:#fff;" +
+      "position:fixed;top:0;left:0;right:0;z-index:9997;background:#0A4F7A;color:#fff;" +
       "padding:10px 14px;display:flex;align-items:center;justify-content:center;gap:12px;" +
       "font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;" +
       "box-shadow:0 2px 6px rgba(0,0,0,.3);";
     banner.innerHTML =
-      "<span>New data synced from another device.</span>" +
-      '<button id="gsc-sync-refresh-btn" style="background:#fff;color:#2f5233;border:none;' +
+      "<span></span>" +
+      '<button id="gsc-sync-refresh-btn" style="background:#fff;color:#0A4F7A;border:none;' +
       'border-radius:6px;padding:6px 12px;font-weight:600;cursor:pointer;font-size:12px;">Refresh</button>';
     document.body.appendChild(banner);
+    banner.querySelector("span").textContent = bannerText();
     banner.querySelector("#gsc-sync-refresh-btn").addEventListener("click", function () {
       window.location.reload();
     });
@@ -183,7 +262,11 @@
     if (!auth) return;
     setOverlayError("");
     setOverlayBusy(true);
-    window.__fb
+    // A showman code is checked first; if it isn't one, try it as the owner passcode.
+    var tryCode = window.__gscSMTryCode ? window.__gscSMTryCode(passcode, auth, db) : Promise.resolve(false);
+    tryCode.catch(function (e) { console.error("[Sync] Showman code check failed:", e); return false; }).then(function (isShowman) {
+    if (isShowman) return;
+    return window.__fb
       .signInWithEmailAndPassword(auth, SYNC_EMAIL, passcode)
       .catch(function (err) {
         setOverlayBusy(false);
@@ -196,9 +279,10 @@
         } else if (code === "auth/too-many-requests") {
           setOverlayError("Too many attempts. Wait a moment and try again.");
         } else {
-          setOverlayError("Incorrect passcode. Try again.");
+          setOverlayError("Incorrect passcode or code. Try again.");
         }
       });
+    });
   }
 
   function pushToFirestore(key, value, ts) {
@@ -237,7 +321,7 @@
     FB.onSnapshot(
       colRef,
       function (snap) {
-        var sawChange = false;
+        var sawChange = false, changedKeys = [];
         var remoteKeysSeen = {};
         snap.docChanges().forEach(function (change) {
           var key = change.doc.id;
@@ -250,7 +334,7 @@
           if (remoteTs <= localTs) return; // we already have this (or our own echoed write)
 
           if (data.deleted) {
-            localStorage.removeItem(LOCAL_PREFIX + key);
+            if (localStorage.getItem(LOCAL_PREFIX + key) != null) { localStorage.removeItem(LOCAL_PREFIX + key); changedKeys.push(key); sawChange = true; }
           } else if (typeof data.value === "string") {
             var existing = localStorage.getItem(LOCAL_PREFIX + key);
             if (existing === data.value) {
@@ -258,7 +342,7 @@
               return;
             }
             localStorage.setItem(LOCAL_PREFIX + key, data.value);
-            sawChange = true;
+            changedKeys.push(key); sawChange = true;
           }
           localStorage.setItem(META_PREFIX + key, String(remoteTs));
         });
@@ -268,7 +352,8 @@
           backfillMissingLocalKeys(remoteKeysSeen);
         }
 
-        if (sawChange) showUpdateBanner();
+        if (sawChange) applyRemote(changedKeys);
+        if (sawChange && window.__gscSMOwnerTouch) window.__gscSMOwnerTouch("*");
         setPillState(navigator.onLine === false ? "offline" : "synced");
       },
       function (err) {
@@ -310,12 +395,25 @@
         auth,
         function (user) {
           currentUser = user;
+          if (SM) {
+            // Showman phone: stays unlocked with an anonymous sign-in; only its own code's data is read.
+            hideOverlay();
+            if (user) { authReady = true; setPillState("syncing"); if (window.__gscSMStart) window.__gscSMStart(db, user); }
+            else { setPillState("offline"); window.__fb.signInAnonymously(auth).catch(function (e) { console.error("[Sync] Showman sign-in:", e); }); }
+            return;
+          }
+          if (user && user.isAnonymous) {
+            // leftover sign-in from checking a showman code; ignore while a check is running
+            if (!window.__gscSMChecking && auth.currentUser && auth.currentUser.isAnonymous) window.__fb.signOut(auth);
+            return;
+          }
           if (user) {
             authReady = true;
             hideOverlay();
             setPillState("syncing");
             startListening();
             flushQueue();
+            if (window.__gscSMOwnerStart) window.__gscSMOwnerStart(db);
           } else {
             authReady = false;
             setPillState("locked");
@@ -343,9 +441,18 @@
   // Boot — runs synchronously as the script parses (document.body already
   // exists since this tag sits right after <div id="root">).
   // ---------------------------------------------------------------------
+  // Not connected to Firebase yet: run on this device only — no passcode screen, no sync pill.
+  if (!FIREBASE_CONFIG.apiKey || !SYNC_EMAIL) {
+    window.__gscSyncPush = function () {};
+    window.__gscPill = function () {};
+    return;
+  }
   pillEl = buildStatusPill();
   overlayEl = buildOverlay();
   setPillState("locked");
+  if (SM) hideOverlay();
+
+  window.__gscPill = setPillState;
 
   window.addEventListener("online", function () {
     if (currentUser) setPillState("syncing");
